@@ -1,6 +1,9 @@
 name: Build Windows release
 
 on:
+  push:
+    tags:
+      - "v*"
   release:
     types: [published]
 
@@ -35,3 +38,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Free2Play-Windows.zip
+          name: Free2Play ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'experimental') || contains(github.ref_name, 'beta') }}

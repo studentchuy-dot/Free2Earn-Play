@@ -3,6 +3,10 @@
 Free2Play conecta eventos de un LIVE de TikTok con una instancia local de
 Minecraft mediante API Bridge. La interfaz y los mensajes están en español.
 
+> **Versión experimental 1.1.1:** incluye una interfaz más grande, estados
+> coloreados, categorías de registro y alertas configurables de sonido y
+> escritorio. Algunas características pueden cambiar en futuras versiones.
+
 > **Importante:** usa primero un mundo de prueba. Las reglas pueden invocar
 > entidades hostiles, TNT, rayos y teletransportar jugadores. Una prueba HTTP
 > confirma que API Bridge recibió la petición; no garantiza que el comando se
@@ -168,6 +172,16 @@ al chat de Minecraft.
 
 ## Registro, depuración y problemas frecuentes
 
+- El registro etiqueta visualmente las solicitudes **GET**, los envíos
+  **POST**, los eventos **LIVE** y otros eventos de la aplicación. Los
+  resultados correctos, advertencias y errores tienen colores diferenciados.
+- En **Configuración → Sonidos y notificaciones** puedes activar o desactivar
+  los tonos de conexión, desconexión y error, las notificaciones de Windows
+  y probar ambos. Las notificaciones no incluyen el usuario de TikTok ni el
+  token de API Bridge.
+- El monitor avanzado está disponible desde **Configuración**. Muestra uso de
+  CPU de Free2Play, estados, contadores de eventos y comandos, último evento y
+  actividad actual.
 - **Minecraft no conecta:** confirma que el juego está abierto, API Bridge
   aparece en el log de esa instancia y la carpeta seleccionada corresponde a
   la ejecución actual.

@@ -44,8 +44,15 @@ from rules_engine import (
     render_title_commands,
     random_mob_variables,
 )
+from ui_feedback import (
+    classify_log_entry,
+    play_status_sound,
+    send_desktop_notification,
+    status_color,
+)
 
 
+APP_VERSION = "1.1.1-experimental"
 APP_DIR = (
     Path(sys.executable).resolve().parent
     if getattr(sys, "frozen", False)
@@ -671,11 +678,12 @@ class RuleDialog(ctk.CTkToplevel):
 class Free2PlayApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Free2Play 1.1.0 Beta")
-        self.geometry("1180x780")
+        self.title(f"Free2Play {APP_VERSION}")
+        self.geometry("1280x820")
         self.minsize(960, 640)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        ctk.set_widget_scaling(1.3)
 
         self.ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.executor = ThreadPoolExecutor(
@@ -840,6 +848,7 @@ class Free2PlayApp(ctk.CTk):
         for column in range(3):
             page.grid_columnconfigure(column, weight=1)
         self.status_labels: dict[str, ctk.CTkLabel] = {}
+        self.status_cards: dict[str, ctk.CTkFrame] = {}
         for column, (key, title) in enumerate(
             (
                 ("tiktok", "TikTok LIVE"),
@@ -848,9 +857,21 @@ class Free2PlayApp(ctk.CTk):
             )
         ):
             card = self._section(page, title, 0, column)
-            label = ctk.CTkLabel(card, text="Desconectado")
+            card.configure(border_width=2)
+            label = ctk.CTkLabel(
+                card,
+                text="Desconectado",
+                font=ctk.CTkFont(size=15, weight="bold"),
+            )
             label.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
             self.status_labels[key] = label
+            self.status_cards[key] = card
+        for key, initial_state in (
+            ("tiktok", "disconnected"),
+            ("minecraft", "disconnected"),
+            ("automation", "paused"),
+        ):
+            self._set_status_appearance(key, initial_state)
 
         actions = self._section(page, "Acciones", 1)
         for column in range(2):
@@ -884,6 +905,7 @@ class Free2PlayApp(ctk.CTk):
         recent.grid_rowconfigure(1, weight=1)
         page.grid_rowconfigure(2, weight=1)
         self.recent_activity = ctk.CTkTextbox(recent, height=210, wrap="word")
+        self._configure_log_textbox(self.recent_activity)
         self.recent_activity.grid(
             row=1, column=0, padx=14, pady=(0, 14), sticky="nsew"
         )
@@ -1149,6 +1171,7 @@ class Free2PlayApp(ctk.CTk):
         frame = self._section(page, "Registro de actividad", 0)
         frame.grid_rowconfigure(1, weight=1)
         self.log_textbox = ctk.CTkTextbox(frame, wrap="none")
+        self._configure_log_textbox(self.log_textbox)
         self.log_textbox.grid(
             row=1, column=0, padx=14, pady=(0, 14), sticky="nsew"
         )
@@ -1395,6 +1418,40 @@ class Free2PlayApp(ctk.CTk):
         self.comment_chat_template_entry.bind(
             "<FocusOut>", lambda _event: self._save_user_preferences()
         )
+        alerts = self._section(
+            settings_content, "Sonidos y notificaciones", 6
+        )
+        ctk.CTkLabel(
+            alerts,
+            text=(
+                "Las conexiones usan un sonido clásico de Windows; los errores "
+                "y desconexiones tienen tonos distintos. Las notificaciones "
+                "del escritorio no incluyen usuario ni token."
+            ),
+            wraplength=760,
+            justify="left",
+        ).grid(row=1, column=0, padx=16, pady=(0, 8), sticky="w")
+        self.desktop_notifications_switch = ctk.CTkSwitch(
+            alerts,
+            text="Mostrar notificaciones de Windows",
+            command=self._save_user_preferences,
+        )
+        self.desktop_notifications_switch.grid(
+            row=2, column=0, padx=16, pady=(0, 8), sticky="w"
+        )
+        self.status_sounds_switch = ctk.CTkSwitch(
+            alerts,
+            text="Reproducir sonido al conectar, desconectar o fallar",
+            command=self._save_user_preferences,
+        )
+        self.status_sounds_switch.grid(
+            row=3, column=0, padx=16, pady=(0, 8), sticky="w"
+        )
+        ctk.CTkButton(
+            alerts,
+            text="Probar sonido y notificación",
+            command=self._send_test_notification,
+        ).grid(row=4, column=0, padx=16, pady=(0, 14), sticky="w")
 
     def _build_advanced_monitor_page(self, page: ctk.CTkFrame) -> None:
         page.grid_columnconfigure(0, weight=1)
@@ -1425,6 +1482,7 @@ class Free2PlayApp(ctk.CTk):
         self.advanced_log_textbox = ctk.CTkTextbox(
             recent, height=220, wrap="word"
         )
+        self._configure_log_textbox(self.advanced_log_textbox)
         self.advanced_log_textbox.grid(
             row=1, column=0, padx=14, pady=(0, 14), sticky="nsew"
         )
@@ -1489,6 +1547,14 @@ class Free2PlayApp(ctk.CTk):
             self.comment_chat_switch.select()
         else:
             self.comment_chat_switch.deselect()
+        if self.preferences.get("desktop_notifications_enabled", True):
+            self.desktop_notifications_switch.select()
+        else:
+            self.desktop_notifications_switch.deselect()
+        if self.preferences.get("status_sounds_enabled", True):
+            self.status_sounds_switch.select()
+        else:
+            self.status_sounds_switch.deselect()
         comment_chat_template = str(
             self.preferences.get(
                 "comment_chat_template",
@@ -1565,6 +1631,12 @@ class Free2PlayApp(ctk.CTk):
                     self.rule_announcement_switch.get()
                 ),
                 "comment_chat_enabled": bool(self.comment_chat_switch.get()),
+                "desktop_notifications_enabled": bool(
+                    self.desktop_notifications_switch.get()
+                ),
+                "status_sounds_enabled": bool(
+                    self.status_sounds_switch.get()
+                ),
                 "comment_chat_template": (
                     self.comment_chat_template_entry.get().strip()
                     or DEFAULT_COMMENT_CHAT_TEMPLATE
@@ -1761,6 +1833,7 @@ class Free2PlayApp(ctk.CTk):
         )
 
     def _set_tiktok_state(self, state: str, detail: str | None = None) -> None:
+        previous_state = self.tiktok_state
         self.tiktok_state = state
         labels = {
             "disconnected": "Desconectado",
@@ -1774,6 +1847,7 @@ class Free2PlayApp(ctk.CTk):
             self.tiktok_page_status,
         ):
             label.configure(text=text)
+        self._set_status_appearance("tiktok", state, (self.tiktok_page_status,))
         button_text = (
             "Desconectar"
             if state == "connected"
@@ -1789,8 +1863,32 @@ class Free2PlayApp(ctk.CTk):
             text=button_text,
             state="disabled" if state == "connecting" else "normal",
         )
+        if state == "connected" and previous_state != "connected":
+            self._notify_status(
+                "TikTok LIVE conectado",
+                "Free2Play ya está recibiendo eventos del LIVE.",
+                "connected",
+            )
+        elif (
+            state == "disconnected"
+            and previous_state != "disconnected"
+            and self.tiktok_connected_for_generation
+        ):
+            self._notify_status(
+                "TikTok LIVE desconectado",
+                "La conexión terminó. Puedes volver a conectarla manualmente.",
+                "disconnected",
+            )
+            self.tiktok_connected_for_generation = False
+        elif state == "error":
+            self._notify_status(
+                "Error de TikTok LIVE",
+                text,
+                "error",
+            )
 
     def _set_minecraft_state(self, state: str, detail: str | None = None) -> None:
+        previous_state = self.minecraft_state
         self.minecraft_state = state
         labels = {
             "disconnected": "Desconectado",
@@ -1801,10 +1899,27 @@ class Free2PlayApp(ctk.CTk):
         self.status_labels["minecraft"].configure(
             text=detail or labels.get(state, state)
         )
+        self._set_status_appearance("minecraft", state)
+        if state == "connected" and previous_state != "connected":
+            self._notify_status(
+                "Minecraft conectado",
+                "API Bridge respondió correctamente.",
+                "connected",
+            )
+        elif state == "error":
+            self._notify_status(
+                "Error de Minecraft",
+                detail or labels["error"],
+                "error",
+            )
 
     def _set_automation_state(self) -> None:
         text = "Activa" if self.automation_running else "Pausada"
         self.status_labels["automation"].configure(text=text)
+        self._set_status_appearance(
+            "automation",
+            "active" if self.automation_running else "paused",
+        )
         self.home_automation_button.configure(
             text=(
                 "Pausar automatización"
@@ -1812,6 +1927,55 @@ class Free2PlayApp(ctk.CTk):
                 else "Iniciar automatización"
             )
         )
+
+    def _set_status_appearance(
+        self,
+        key: str,
+        state: str,
+        extra_labels: tuple[ctk.CTkLabel, ...] = (),
+    ) -> None:
+        color = status_color(state)
+        label = self.status_labels.get(key)
+        if label is not None:
+            label.configure(text_color=color)
+        card = self.status_cards.get(key)
+        if card is not None:
+            card.configure(border_color=color)
+        for extra_label in extra_labels:
+            extra_label.configure(text_color=color)
+
+    def _notify_status(
+        self,
+        title: str,
+        message: str,
+        state: str,
+    ) -> None:
+        if self.status_sounds_switch.get():
+            try:
+                play_status_sound(state)
+            except (OSError, RuntimeError) as exc:
+                self._log(
+                    "Notificaciones",
+                    "No se pudo reproducir el sonido",
+                    detail=str(exc),
+                )
+        if self.desktop_notifications_switch.get():
+            try:
+                send_desktop_notification(title, message)
+            except (OSError, RuntimeError) as exc:
+                self._log(
+                    "Notificaciones",
+                    "No se pudo enviar la notificación de Windows",
+                    detail=str(exc),
+                )
+
+    def _send_test_notification(self) -> None:
+        self._notify_status(
+            "Free2Play",
+            "El sonido y las notificaciones están configurados.",
+            "connected",
+        )
+        self._log("Notificaciones", "Prueba de sonido y notificación")
 
     def _log(
         self,
@@ -1849,11 +2013,33 @@ class Free2PlayApp(ctk.CTk):
             if textbox is None:
                 continue
             textbox.configure(state="normal")
-            textbox.insert("end", line)
+            category, severity = classify_log_entry(
+                row[1], row[3], row[4]
+            )
+            textbox.insert(
+                "end",
+                f"{timestamp} | [{category}] ",
+                f"log_category_{category.casefold()}",
+            )
+            textbox.insert("end", line[len(timestamp) + 3 :], f"log_{severity}")
             textbox.see("end")
             textbox.configure(state="disabled")
         self.current_activity = f"{result}: {detail or event_type}"
         self._update_advanced_monitor_values()
+
+    @staticmethod
+    def _configure_log_textbox(textbox: ctk.CTkTextbox) -> None:
+        styles = {
+            "log_category_get": "#38bdf8",
+            "log_category_post": "#c084fc",
+            "log_category_live": "#f472b6",
+            "log_category_app": "#94a3b8",
+            "log_success": "#4ade80",
+            "log_warning": "#60a5fa",
+            "log_error": "#f87171",
+        }
+        for tag, color in styles.items():
+            textbox.tag_config(tag, foreground=color)
 
     def _submit(
         self,
@@ -2392,14 +2578,14 @@ class Free2PlayApp(ctk.CTk):
                 self.api_token = None
                 self.token_status.configure(text="Token: no cargado")
                 self._set_minecraft_state("error", "Error al probar API Bridge")
-                self._log("Minecraft", "Prueba de conexión fallida", detail=error)
+                self._log("HTTP GET", "Prueba de conexión fallida", detail=error)
             else:
                 self.api_token = result[0]
                 response = result[1]
                 self._set_minecraft_state("connected")
                 self.token_status.configure(text="Token: cargado en memoria (oculto)")
                 self._log(
-                    "Minecraft",
+                    "HTTP GET",
                     f"Conexión HTTP correcta (HTTP {response.status})",
                     detail=(
                         "GET /api/"

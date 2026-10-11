@@ -1,2 +1,3 @@
 TikTokLive==7.0.1
 customtkinter>=5.2.2,<7
+winotify>=1.1.0,<2
