@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+.pytest_cache/
+.coverage
+
+# Per-user settings and editable local configurations
+settings.json
+rules.json
+profiles.json
+
+# Windows packaging leftovers
+*.spec.bak
+*.iss.local
