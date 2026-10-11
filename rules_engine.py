@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import json
 import os
+import random
 import re
 import tempfile
 import unicodedata
@@ -13,6 +13,32 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
+
+RANDOM_HOSTILE_MOBS = (
+    "minecraft:creeper",
+    "minecraft:zombie",
+    "minecraft:skeleton",
+    "minecraft:blaze",
+    "minecraft:ghast",
+)
+WEIGHTED_HOSTILE_MOBS = (
+    "minecraft:zombie",
+    "minecraft:skeleton",
+    "minecraft:creeper",
+    "minecraft:blaze",
+    "minecraft:ghast",
+)
+WEIGHTED_HOSTILE_MOB_WEIGHTS = (40, 30, 20, 8, 2)
+RANDOM_PASSIVE_MOBS = (
+    "minecraft:chicken",
+    "minecraft:cow",
+    "minecraft:pig",
+    "minecraft:sheep",
+    "minecraft:rabbit",
+    "minecraft:turtle",
+    "minecraft:fox",
+    "minecraft:goat",
+)
 
 REQUIRED_EVENT_FIELDS = {
     "comment": ("text",),
@@ -205,6 +231,92 @@ def render_action_commands(
     ]
 
 
+def build_rule_test_commands(
+    rule: Rule,
+    *,
+    player: str = "@a",
+    username: str = "Free2Play",
+) -> tuple[dict[str, Any], list[str]]:
+    """Build safe, deterministic event data and commands for a manual rule test."""
+    gift_name = rule.conditions.get("gift_name", "")
+    if rule.event_type == "gift" and not gift_name:
+        raise ValueError("La regla de regalo necesita el nombre del regalo.")
+    event: dict[str, Any] = {
+        "event": rule.event_type,
+        "event_id": f"manual-rule-test-{rule.id}",
+        "userid": "free2play-test-user",
+        "shortname": username,
+        "user": username,
+        "text": "Prueba de regla Free2Play",
+        "gift_name": gift_name,
+        "gift_id": "manual-test-gift",
+        "amount": 1,
+        "count": rule.like_threshold if rule.event_type == "like" else 1,
+        "total": rule.like_threshold if rule.event_type == "like" else 1,
+        "diamond_count": 1,
+        "repeat_count": 1,
+        "entity": rule.entity_id,
+        "player": player or "@a",
+    }
+    event.update(random_mob_variables())
+    event.update(rule.conditions)
+    commands = render_action_commands(rule.action, event)
+    commands = [
+        add_summon_custom_name(command, username)
+        for command in commands
+    ]
+    repeat_cycles = (
+        rule.spawn_count
+        if rule.action_kind == "spawn"
+        else rule.repeat_count
+    )
+    if rule.repeat_by_amount and rule.event_type == "gift":
+        repeat_cycles *= int(event["amount"])
+    return event, commands * repeat_cycles
+
+
+def add_summon_custom_name(command: str, username: str) -> str:
+    """Name a summoned entity with its TikTok sender, unless named already."""
+    name = sanitize_chat_text(username)
+    if not name:
+        return command
+
+    summon = re.search(
+        r"(?:^|\brun\s+)summon\s+\S+\s+\S+\s+\S+\s+\S+",
+        command,
+    )
+    if summon is None:
+        return command
+
+    component = json.dumps(
+        {"text": name},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    snbt_component = "'" + component.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    name_data = f"CustomName:{snbt_component},CustomNameVisible:1b"
+    suffix = command[summon.end():].strip()
+
+    if suffix.startswith("{"):
+        if not suffix.endswith("}"):
+            return command
+        contents = suffix[1:-1]
+        if re.search(r"(?:^|,)\s*CustomName\s*:", contents):
+            return command
+        separator = "," if contents.strip() else ""
+        return (
+            command[:summon.end()]
+            + " {"
+            + name_data
+            + separator
+            + contents
+            + "}"
+        )
+    if suffix:
+        return command
+    return f"{command} {{{name_data}}}"
+
+
 def render_tellraw_command(
     target: str,
     template: str,
@@ -227,6 +339,58 @@ def render_tellraw_command(
         separators=(",", ":"),
     )
     return f"tellraw {clean_target} {component}"
+
+
+def render_title_commands(
+    target: str,
+    title_template: str,
+    subtitle_template: str,
+    event: Mapping[str, Any],
+    *,
+    color: str = "light_purple",
+) -> list[str]:
+    """Create safely escaped, purple title and subtitle commands."""
+    if color not in {"light_purple", "dark_purple"}:
+        raise ValueError("El color del anuncio debe ser morado.")
+    clean_target = target.strip()
+    if not clean_target:
+        raise ValueError("El anuncio necesita un selector objetivo.")
+    title = sanitize_chat_text(render_action_template(title_template, event))
+    subtitle = sanitize_chat_text(render_action_template(subtitle_template, event))
+    if not title:
+        title = sanitize_chat_text(
+            str(event.get("shortname") or event.get("user") or "TikTok")
+        )
+    if not subtitle:
+        raise ValueError("El subtítulo del anuncio no puede estar vacío.")
+    title_json = json.dumps(
+        {"text": title, "color": color, "bold": True},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    subtitle_json = json.dumps(
+        {"text": subtitle, "color": color},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return [
+        f"title {clean_target} times 10 60 10",
+        f"title {clean_target} title {title_json}",
+        f"title {clean_target} subtitle {subtitle_json}",
+    ]
+
+
+def random_mob_variables() -> dict[str, str]:
+    """Choose one basic hostile, weighted hostile, and passive entity."""
+    return {
+        "rmob": random.choice(RANDOM_HOSTILE_MOBS),
+        "rratio": random.choices(
+            WEIGHTED_HOSTILE_MOBS,
+            weights=WEIGHTED_HOSTILE_MOB_WEIGHTS,
+            k=1,
+        )[0],
+        "rpacific": random.choice(RANDOM_PASSIVE_MOBS),
+    }
 
 
 def sanitize_chat_text(text: str) -> str:
@@ -333,6 +497,15 @@ class RuleEngine:
         event_id = event.get("event_id")
         if event_id is not None:
             key = str(event_id)
+            if str(event.get("event", "")).lower() == "like":
+                key = ":".join(
+                    (
+                        key,
+                        str(event.get("userid") or ""),
+                        str(event.get("count") or ""),
+                        str(event.get("total") or ""),
+                    )
+                )
             if key in self._seen_ids:
                 return []
             if len(self._seen_order) == self._seen_order.maxlen:
@@ -347,6 +520,15 @@ class RuleEngine:
             return [fallback_rule]
         return []
 
+    def normalize_like_count(self, count: Any, total: Any) -> int:
+        """Return TikTok's increment; total is per-event context, not a delta."""
+        _ = total
+        try:
+            increment = max(0, int(count))
+        except (TypeError, ValueError):
+            increment = 0
+        return increment
+
     def consume_likes(self, rule: Rule, amount: int) -> int:
         """Devuelve los umbrales completos cruzados por el incremento de likes."""
         if amount <= 0 or rule.like_threshold <= 0:
@@ -356,6 +538,10 @@ class RuleEngine:
             progress, rule.like_threshold
         )
         return crossed
+
+    def like_progress(self, rule: Rule) -> int:
+        """Return the currently accumulated likes below this rule's threshold."""
+        return self._like_progress.get(rule.id, 0)
 
     def reset_like_progress(self) -> None:
         self._like_progress.clear()

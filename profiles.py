@@ -1,4 +1,4 @@
-"""Perfiles de reglas y perfil de ejemplo Dani."""
+"""Perfiles de reglas y perfil inicial predeterminado."""
 
 from __future__ import annotations
 
@@ -38,20 +38,19 @@ def _gift_rule(
     )
 
 
-def create_dani_profile() -> RuleProfile:
+def create_default_profile() -> RuleProfile:
     """Return the editable default ruleset; automation itself remains paused."""
     player = "{player}"
     return RuleProfile(
-        "dani",
+        "default",
         [
             Rule.create(
-                "Seguir: creeper cargado",
+                "Seguir: creeper",
                 "follow",
                 {},
                 "execute as "
                 + player
-                + " at @s run summon minecraft:creeper ~ ~ ~ "
-                "{powered:true,Fuse:10,ignited:true}",
+                + " at @s run summon minecraft:creeper ~ ~ ~",
             ),
             _gift_rule(
                 "Rosa: TNT con mecha de 40 ticks",
@@ -103,12 +102,11 @@ def create_dani_profile() -> RuleProfile:
                 "[minecraft:max_stack_size=16] 1",
             ),
             _gift_rule(
-                "Corazón con dedos: creeper cargado",
+                "Corazón con dedos: creeper",
                 "Finger Heart",
                 "execute as "
                 + player
-                + " at @s run summon minecraft:creeper ~ ~ ~ "
-                "{powered:true,Fuse:10,ignited:true}",
+                + " at @s run summon minecraft:creeper ~ ~ ~",
             ),
             _gift_rule(
                 "Collar de amistad: pollo jinete",
@@ -172,6 +170,11 @@ def create_dani_profile() -> RuleProfile:
     )
 
 
+def create_dani_profile() -> RuleProfile:
+    """Backward-compatible alias for older integrations."""
+    return create_default_profile()
+
+
 class RuleProfileStore:
     """Persist rule profiles without changing the legacy rules.json file."""
 
@@ -180,7 +183,7 @@ class RuleProfileStore:
 
     def load(self, legacy_rules: list[Rule] | None = None) -> list[RuleProfile]:
         if not self.path.exists():
-            profiles = [create_dani_profile()]
+            profiles = [create_default_profile()]
             if legacy_rules:
                 profiles.append(
                     RuleProfile(
@@ -221,6 +224,25 @@ class RuleProfileStore:
             raise ValueError(f"El archivo contiene un perfil no válido: {exc}") from exc
         if not profiles:
             raise ValueError("Debe existir al menos un perfil.")
+        default_exists = any(
+            profile.name.casefold() == "default" for profile in profiles
+        )
+        legacy_default = next(
+            (
+                profile
+                for profile in profiles
+                if profile.name.casefold() == "dani"
+            ),
+            None,
+        )
+        if legacy_default is not None and not default_exists:
+            legacy_default.name = "default"
+            for rule in legacy_default.rules:
+                rule.action = rule.action.replace(
+                    "{powered:true,Fuse:10,ignited:true}",
+                    "{powered:false,ignited:false}",
+                )
+            self.save(profiles)
         return profiles
 
     def save(self, profiles: list[RuleProfile]) -> None:

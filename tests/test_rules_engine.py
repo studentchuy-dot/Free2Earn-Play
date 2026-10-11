@@ -9,11 +9,17 @@ from rules_engine import (
     Rule,
     RuleEngine,
     RuleStore,
+    add_summon_custom_name,
+    build_rule_test_commands,
     missing_event_fields,
     render_action_commands,
     render_action_template,
     sanitize_chat_text,
     render_tellraw_command,
+    render_title_commands,
+    RANDOM_HOSTILE_MOBS,
+    RANDOM_PASSIVE_MOBS,
+    WEIGHTED_HOSTILE_MOBS,
 )
 
 
@@ -52,6 +58,29 @@ class RuleEngineTests(unittest.TestCase):
         event = {"event": "comment", "event_id": "evt-1"}
         self.assertEqual(engine.match_event(event), [rule])
         self.assertEqual(engine.match_event(event), [])
+
+    def test_like_events_with_reused_message_id_are_deduplicated_by_total(self) -> None:
+        rule = Rule.create("Likes", "like", {}, "summon minecraft:zombie ~ ~ ~")
+        engine = RuleEngine([rule])
+
+        self.assertEqual(
+            engine.match_event(
+                {"event": "like", "event_id": "like-1", "total": 201}
+            ),
+            [rule],
+        )
+        self.assertEqual(
+            engine.match_event(
+                {"event": "like", "event_id": "like-1", "total": 202}
+            ),
+            [rule],
+        )
+        self.assertEqual(
+            engine.match_event(
+                {"event": "like", "event_id": "like-1", "total": 202}
+            ),
+            [],
+        )
 
     def test_fallback_rule_only_matches_when_no_regular_rule_matches(self) -> None:
         known_gift = Rule.create(
@@ -108,6 +137,132 @@ class RuleEngineTests(unittest.TestCase):
             ),
             "summon minecraft:zombie ~ ~ ~",
         )
+
+    def test_like_count_uses_event_increment_not_cumulative_total(self) -> None:
+        engine = RuleEngine([])
+
+        self.assertEqual(engine.normalize_like_count(4, 104), 4)
+        self.assertEqual(engine.normalize_like_count(3, 107), 3)
+        self.assertEqual(engine.normalize_like_count(3, 107), 3)
+        self.assertEqual(engine.normalize_like_count(2, 2), 2)
+
+    def test_200_like_threshold_counts_increments_from_different_users(self) -> None:
+        rule = Rule.create(
+            "Zombie cada 200 likes",
+            "like",
+            {},
+            "summon minecraft:zombie ~ ~ ~",
+            action_kind="spawn",
+            like_threshold=200,
+        )
+        engine = RuleEngine([rule])
+        first_count = engine.normalize_like_count(120, 120)
+        second_count = engine.normalize_like_count(80, 200)
+        first_event = {
+            "event": "like",
+            "event_id": "reused-like-id",
+            "userid": "user-1",
+            "count": first_count,
+            "total": 120,
+        }
+        second_event = {
+            "event": "like",
+            "event_id": "reused-like-id",
+            "userid": "user-2",
+            "count": second_count,
+            "total": 200,
+        }
+
+        self.assertEqual(engine.match_event(first_event), [rule])
+        self.assertEqual(engine.consume_likes(rule, first_count), 0)
+        self.assertEqual(engine.match_event(second_event), [rule])
+        self.assertEqual(engine.consume_likes(rule, second_count), 1)
+        self.assertEqual(engine.match_event(second_event), [])
+
+    def test_summon_custom_name_uses_sender_and_escapes_snbt(self) -> None:
+        self.assertEqual(
+            add_summon_custom_name(
+                "execute as @a at @s run summon minecraft:zombie ~ ~ ~",
+                "Dani",
+            ),
+            "execute as @a at @s run summon minecraft:zombie ~ ~ ~ "
+            """{CustomName:'{"text":"Dani"}',CustomNameVisible:1b}""",
+        )
+        self.assertEqual(
+            add_summon_custom_name(
+                "summon minecraft:bee ~ ~ ~ {AngerTime:1200}",
+                "O'Brien",
+            ),
+            """summon minecraft:bee ~ ~ ~ """
+            """{CustomName:'{"text":"O\\'Brien"}',CustomNameVisible:1b,"""
+            """AngerTime:1200}""",
+        )
+
+    def test_summon_custom_name_preserves_explicit_custom_name(self) -> None:
+        command = (
+            """summon minecraft:zombie ~ ~ ~ """
+            """{CustomName:'{"text":"Fixed"}'}"""
+        )
+        self.assertEqual(add_summon_custom_name(command, "Dani"), command)
+
+    def test_manual_gift_rule_test_uses_rule_gift_and_free2play_user(self) -> None:
+        rule = Rule.create(
+            "Rosa",
+            "gift",
+            {"gift_name": "Rose"},
+            "say {username} envió {gift_name} x{amount}",
+        )
+
+        event, commands = build_rule_test_commands(rule)
+
+        self.assertEqual(event["user"], "Free2Play")
+        self.assertEqual(event["gift_name"], "Rose")
+        self.assertEqual(
+            commands,
+            ["say Free2Play envió Rose x1"],
+        )
+
+    def test_manual_rule_test_preserves_multiple_commands_in_order(self) -> None:
+        rule = Rule.create(
+            "Preparar área",
+            "comment",
+            {},
+            "say {username} inició\n"
+            "effect give {player} minecraft:speed 5 1\n"
+            "say Listo",
+        )
+
+        _, commands = build_rule_test_commands(rule, player="Dani")
+
+        self.assertEqual(
+            commands,
+            [
+                "say Free2Play inició",
+                "effect give Dani minecraft:speed 5 1",
+                "say Listo",
+            ],
+        )
+
+    def test_manual_like_rule_test_uses_threshold_without_gift_condition(self) -> None:
+        rule = Rule.create(
+            "Mobs por likes",
+            "like",
+            {},
+            "say {username} recibió {count} likes",
+            like_threshold=200,
+        )
+
+        event, commands = build_rule_test_commands(rule)
+
+        self.assertEqual(event["user"], "Free2Play")
+        self.assertEqual(event["count"], 200)
+        self.assertEqual(commands, ["say Free2Play recibió 200 likes"])
+
+    def test_manual_gift_rule_test_rejects_missing_gift_name(self) -> None:
+        rule = Rule.create("Regalo", "gift", {}, "say {gift_name}")
+
+        with self.assertRaisesRegex(ValueError, "nombre del regalo"):
+            build_rule_test_commands(rule)
 
     def test_action_template_expands_event_values_and_removes_newlines(self) -> None:
         command = render_action_template(
@@ -170,6 +325,54 @@ class RuleEngineTests(unittest.TestCase):
                 {},
                 color="red",
             )
+
+    def test_title_announcement_uses_purple_title_and_escaped_subtitle(self) -> None:
+        commands = render_title_commands(
+            "@a",
+            "{shortname}",
+            "{interaccion}",
+            {
+                "shortname": 'chuy"🙂',
+                "interaccion": 'envió Rose\\Gift x2',
+            },
+        )
+
+        self.assertEqual(
+            commands[0],
+            "title @a times 10 60 10",
+        )
+        title_json = commands[1].split(" ", 3)[3]
+        subtitle_json = commands[2].split(" ", 3)[3]
+        self.assertEqual(
+            json.loads(title_json),
+            {"text": 'chuy"🙂', "color": "light_purple", "bold": True},
+        )
+        self.assertEqual(
+            json.loads(subtitle_json),
+            {
+                "text": "envió Rose\\Gift x2",
+                "color": "light_purple",
+            },
+        )
+
+    def test_random_mob_variables_use_safe_non_boss_entity_pools(self) -> None:
+        rule = Rule.create(
+            "Aleatorios",
+            "gift",
+            {"gift_name": "Rose"},
+            "summon {rmob} ~ ~ ~\n"
+            "summon {rratio} ~ ~ ~\n"
+            "summon {rpacific} ~ ~ ~",
+        )
+
+        event, commands = build_rule_test_commands(rule)
+
+        self.assertIn(commands[0].split()[1], RANDOM_HOSTILE_MOBS)
+        self.assertIn(commands[1].split()[1], WEIGHTED_HOSTILE_MOBS)
+        self.assertIn(commands[2].split()[1], RANDOM_PASSIVE_MOBS)
+        self.assertEqual(event["rmob"], commands[0].split()[1])
+        self.assertEqual(event["rratio"], commands[1].split()[1])
+        self.assertEqual(event["rpacific"], commands[2].split()[1])
 
     def test_chat_text_removes_invisible_controls_but_keeps_unicode(self) -> None:
         self.assertEqual(

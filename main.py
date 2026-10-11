@@ -36,9 +36,13 @@ from rules_engine import (
     Rule,
     RuleEngine,
     RuleStore,
+    add_summon_custom_name,
+    build_rule_test_commands,
     missing_event_fields,
     render_action_commands,
     render_tellraw_command,
+    render_title_commands,
+    random_mob_variables,
 )
 
 
@@ -85,7 +89,8 @@ FALLBACK_LOADERS = ("fabric", "forge", "neoforge", "quilt")
 DEFAULT_UNMATCHED_GIFT_COMMAND = (
     "execute as {player} at @s run summon minecraft:slime ~ ~ ~ {Size:4}"
 )
-DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE = "{usuario}: {interaccion} [{regla}]"
+DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE = "{shortname}"
+DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE = "{interaccion}"
 DEFAULT_COMMENT_CHAT_TEMPLATE = "{username}: {text}"
 
 
@@ -98,24 +103,29 @@ class RuleDialog(ctk.CTkToplevel):
     ) -> None:
         super().__init__(master)
         self.title("Editar regla" if rule else "Crear regla")
-        self.geometry("680x800")
-        self.minsize(620, 700)
-        self.resizable(False, False)
+        self.geometry("650x680")
+        self.minsize(560, 500)
+        self.resizable(True, True)
         self.on_save = on_save
         self.rule = rule
         self._default_message = ""
         self.transient(master)
         self.grab_set()
 
-        frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        frame.pack(fill="both", expand=True, padx=16, pady=12)
+        content = ctk.CTkFrame(self, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=16, pady=(12, 0))
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+        frame = ctk.CTkScrollableFrame(content, fg_color="transparent")
+        frame.grid(row=0, column=0, sticky="nsew")
         frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             frame,
-            text="Modo por bloques: elige evento y acción, sin tener que escribir "
-            "comandos. Modo avanzado: edita el comando Minecraft directamente.",
-            wraplength=590,
+            text="1. Elige el evento. 2. Configura el filtro si hace falta. "
+            "3. Define la acción y guarda. En avanzado, escribe un comando "
+            "Minecraft por línea.",
+            wraplength=570,
             justify="left",
         ).grid(row=0, column=0, sticky="w", pady=(0, 10))
         ctk.CTkLabel(frame, text="Nombre para reconocer la regla").grid(
@@ -229,12 +239,13 @@ class RuleDialog(ctk.CTkToplevel):
         self.action_help_label.grid(row=18, column=0, sticky="w", pady=(0, 8))
 
         self.command_label = ctk.CTkLabel(
-            frame, text="Comando Minecraft (sin / inicial)"
+            frame, text="Comandos Minecraft (uno por línea, sin / inicial)"
         )
         self.command_label.grid(row=19, column=0, sticky="w")
-        self.action_entry = ctk.CTkEntry(
+        self.action_entry = ctk.CTkTextbox(
             frame,
-            placeholder_text="say Hola o summon minecraft:zombie ~ ~ ~",
+            height=120,
+            wrap="word",
         )
         self.action_entry.grid(row=20, column=0, sticky="ew", pady=(4, 4))
         self.variable_help_label = ctk.CTkLabel(
@@ -242,8 +253,13 @@ class RuleDialog(ctk.CTkToplevel):
             text="Variables: {username}, {user}, {usuario}, {player}, "
             "{shortname}, {userid}, {text}, {gift}, {giftname}, {amount}, "
             "{count}, {total}, {diamond_count}, {repeat_count}, {entity} "
-            "y otros campos del evento. Cada línea se envía como un comando "
-            "separado. {username} es TikTok; {player} es el selector de Minecraft.",
+            "{rmob}, {rratio}, {rpacific} y otros campos del evento. "
+            "En avanzado puedes usar, por ejemplo, "
+            "summon {rmob} ~ ~ ~. Cada línea no vacía se envía como "
+            "comando, en orden. {username} es TikTok; {player} es el selector "
+            "de Minecraft. {rmob} elige un hostil básico, {rratio} pondera "
+            "los hostiles para que los raros salgan menos y {rpacific} elige "
+            "un animal.",
             wraplength=590,
             justify="left",
             text_color=("gray40", "gray70"),
@@ -269,9 +285,12 @@ class RuleDialog(ctk.CTkToplevel):
         self.enabled_switch = ctk.CTkSwitch(frame, text="Activar esta regla")
         self.enabled_switch.grid(row=25, column=0, sticky="w", pady=(0, 10))
 
-        ctk.CTkButton(frame, text="Guardar regla", command=self._save).grid(
-            row=26, column=0, sticky="ew"
+        self.save_button = ctk.CTkButton(
+            self,
+            text="Guardar regla",
+            command=self._save,
         )
+        self.save_button.pack(fill="x", padx=16, pady=12)
 
         if rule is not None:
             self.name_entry.insert(0, rule.name)
@@ -299,7 +318,7 @@ class RuleDialog(ctk.CTkToplevel):
             elif rule.action_kind == "spawn":
                 self.entity_entry.insert(0, rule.entity_id)
                 self.spawn_count_entry.insert(0, str(rule.spawn_count))
-            self.action_entry.insert(0, rule.action)
+            self.action_entry.insert("1.0", rule.action)
             self.like_threshold_entry.insert(0, str(rule.like_threshold))
             self.repeat_entry.insert(0, str(rule.repeat_count))
             if rule.repeat_by_amount:
@@ -322,6 +341,8 @@ class RuleDialog(ctk.CTkToplevel):
         self._update_action_controls()
 
     def _on_event_changed(self, _label: str) -> None:
+        self.condition_field_entry.delete(0, "end")
+        self.condition_value_entry.set("")
         self._set_default_chat_template()
         self._update_action_controls()
 
@@ -343,9 +364,9 @@ class RuleDialog(ctk.CTkToplevel):
     def _on_mode_changed(self, _mode: str) -> None:
         if (
             self.mode_menu.get() == "Avanzado (comando)"
-            and not self.action_entry.get().strip()
+            and not self._get_action_text().strip()
         ):
-            self.action_entry.insert(0, self._command_from_blocks())
+            self.action_entry.insert("1.0", self._command_from_blocks())
         self._update_action_controls()
 
     def _on_block_kind_changed(self, _kind: str) -> None:
@@ -353,10 +374,13 @@ class RuleDialog(ctk.CTkToplevel):
             self._set_default_chat_template()
         elif (
             self.block_kind_menu.get() == "Invocar mobs"
-            and not self.action_entry.get().strip()
+            and not self._get_action_text().strip()
         ):
-            self.action_entry.insert(0, self._command_from_blocks())
+            self.action_entry.insert("1.0", self._command_from_blocks())
         self._update_action_controls()
+
+    def _get_action_text(self) -> str:
+        return self.action_entry.get("1.0", "end-1c").strip()
 
     def _command_from_blocks(self) -> str:
         if self.block_kind_menu.get() == "Enviar mensaje al chat":
@@ -364,7 +388,7 @@ class RuleDialog(ctk.CTkToplevel):
             return f"say {message}" if message else ""
         if self.block_kind_menu.get() == "Invocar mobs":
             return "summon {entity} ~ ~ ~"
-        return self.action_entry.get().strip()
+        return self._get_action_text()
 
     def _update_action_controls(self) -> None:
         advanced = self.mode_menu.get() == "Avanzado (comando)"
@@ -378,6 +402,33 @@ class RuleDialog(ctk.CTkToplevel):
         )
         event_type = EVENT_TYPES_BY_LABEL.get(self.event_menu.get(), "comment")
         example_field = EVENT_FIELDS[event_type].split(",", 1)[0].split()[0]
+        show_condition = event_type not in {"like", "follow", "share", "join"}
+        if event_type == "gift":
+            if not self.condition_field_entry.get().strip():
+                self.condition_field_entry.insert(0, "gift_name")
+            self.condition_help_label.configure(
+                text=(
+                    "Regalo que activa la regla (obligatorio). Elige del catálogo "
+                    "o escribe el nombre exacto."
+                )
+            )
+            self.condition_field_entry.grid_remove()
+        elif event_type == "like":
+            self.condition_help_label.configure(
+                text="Los likes usan el incremento recibido y el umbral de abajo; no requieren filtros."
+            )
+        elif not show_condition:
+            self.condition_help_label.configure(
+                text="Este evento no necesita filtros adicionales."
+            )
+        else:
+            self.condition_help_label.configure(
+                text=(
+                    "Filtro opcional: completa campo y valor para filtrar; "
+                    "déjalos vacíos para aceptar cualquier evento."
+                )
+            )
+            self.condition_field_entry.grid()
         self.condition_field_entry.configure(
             placeholder_text=f"Campo JSON de {EVENT_LABELS[event_type]}, "
             f"por ejemplo {example_field}"
@@ -390,27 +441,20 @@ class RuleDialog(ctk.CTkToplevel):
             catalog_status = (
                 f"Catálogo TikTok cargado: {len(gift_names)} regalos."
                 if gift_names
-                else "Conecta TikTok LIVE para cargar regalos; también puedes "
-                "escribir el nombre manualmente."
+                else "Puedes escribir el nombre del regalo manualmente."
             )
             self.condition_help_label.configure(
-                text=(
-                    "Filtro de regalo: elige un regalo de la lista o escribe "
-                    "su nombre. Se guardará como coincidencia exacta."
-                    f"\n{catalog_status}"
-                )
+                text=f"{self.condition_help_label.cget('text')}\n{catalog_status}"
             )
         else:
             self.condition_value_entry.configure(
-                values=getattr(self.master, "gift_catalog_names", [])
+                values=[]
             )
-            self.condition_help_label.configure(
-                text=(
-                    "Filtro opcional: completa los dos campos para reaccionar "
-                    "solo cuando coincida ese dato. Déjalos vacíos para aceptar "
-                    "cualquier evento del tipo elegido."
-                )
-            )
+        if show_condition:
+            self.condition_value_entry.grid()
+        else:
+            self.condition_field_entry.grid_remove()
+            self.condition_value_entry.grid_remove()
         is_spawn_action = kind == "Invocar mobs" or (
             advanced
             and self.rule is not None
@@ -476,8 +520,10 @@ class RuleDialog(ctk.CTkToplevel):
                 "identifica automáticamente la cuenta de Minecraft."
             )
         self.action_help_label.configure(
-            text=f"{help_text}\nCampos de {EVENT_LABELS[event_type]}: "
-            f"{EVENT_FIELDS.get(event_type, 'campos JSON del evento')}."
+            text=(
+                f"{help_text}\nDatos: "
+                f"{EVENT_FIELDS.get(event_type, 'campos JSON del evento')}."
+            )
         )
 
     def _save(self) -> None:
@@ -505,24 +551,55 @@ class RuleDialog(ctk.CTkToplevel):
                 )
             )
             if action_mode == "advanced":
-                action = self.action_entry.get().strip()
+                action = self._get_action_text()
             elif action_kind == "chat":
                 message = self.chat_template_entry.get().strip()
                 action = f"say {message}" if message else ""
             elif action_kind == "spawn":
                 action = "summon {entity} ~ ~ ~"
             else:
-                action = self.action_entry.get().strip()
+                action = self._get_action_text()
 
-            threshold = int(self.like_threshold_entry.get().strip() or "100")
-            spawn_count = int(self.spawn_count_entry.get().strip() or "1")
-            repeat_count = int(self.repeat_entry.get().strip() or "1")
-            entity_id = self.entity_entry.get().strip() or "minecraft:zombie"
             event_type = EVENT_TYPES_BY_LABEL.get(
                 self.event_menu.get(), self.event_menu.get().strip().lower()
             )
-            if event_type == "gift" and condition_value and not condition_field:
+            threshold = (
+                int(self.like_threshold_entry.get().strip() or "100")
+                if event_type == "like"
+                else (self.rule.like_threshold if self.rule else 100)
+            )
+            spawn_count = (
+                int(self.spawn_count_entry.get().strip() or "1")
+                if action_kind == "spawn"
+                else (self.rule.spawn_count if self.rule else 1)
+            )
+            repeat_count = (
+                int(self.repeat_entry.get().strip() or "1")
+                if action_kind != "spawn"
+                else (self.rule.repeat_count if self.rule else 1)
+            )
+            entity_id = (
+                self.entity_entry.get().strip() or "minecraft:zombie"
+                if action_kind == "spawn"
+                else (
+                    self.rule.entity_id
+                    if self.rule
+                    else "minecraft:zombie"
+                )
+            )
+            if event_type in {"like", "follow", "share", "join"}:
+                condition_field = ""
+                condition_value = ""
+            elif event_type == "gift":
                 condition_field = "gift_name"
+                if not condition_value:
+                    messagebox.showerror(
+                        "Falta el nombre del regalo",
+                        "Selecciona o escribe el nombre del regalo que activará esta regla.",
+                        parent=self,
+                    )
+                    self.condition_value_entry.focus_set()
+                    return
             if bool(condition_field) != bool(condition_value):
                 messagebox.showerror(
                     "Condición incompleta",
@@ -594,7 +671,7 @@ class RuleDialog(ctk.CTkToplevel):
 class Free2PlayApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Free2Play")
+        self.title("Free2Play 1.1.0 Beta")
         self.geometry("1180x780")
         self.minsize(960, 640)
         ctk.set_appearance_mode("dark")
@@ -607,7 +684,7 @@ class Free2PlayApp(ctk.CTk):
         self.rule_store = RuleStore(RULES_PATH)
         self.profile_store = RuleProfileStore(PROFILES_PATH)
         self.profiles: list[RuleProfile] = []
-        self.active_profile_name = "dani"
+        self.active_profile_name = "default"
         self.settings_store = AppSettingsStore()
         self.preferences_error: str | None = None
         try:
@@ -624,6 +701,7 @@ class Free2PlayApp(ctk.CTk):
         self.rules: list[Rule] = []
         self.rule_engine = RuleEngine(self.rules)
         self.selected_rule_id: str | None = None
+        self.rule_test_buttons: dict[str, ctk.CTkButton] = {}
         self.api_token: str | None = None
         self.gift_catalog_names: list[str] = []
         self.forwarded_comment_ids: set[str] = set()
@@ -948,6 +1026,12 @@ class Free2PlayApp(ctk.CTk):
             text="Probar conexión",
             command=self._test_minecraft_connection,
         ).pack(side="left", padx=8)
+        self.minecraft_test_command_button = ctk.CTkButton(
+            token_buttons,
+            text="Enviar comando de prueba",
+            command=self._send_test_minecraft_command,
+        )
+        self.minecraft_test_command_button.pack(side="left", padx=8)
         ctk.CTkLabel(
             connection,
             text="La prueba consulta GET /api/ con Authorization: Bearer <token>.",
@@ -999,25 +1083,13 @@ class Free2PlayApp(ctk.CTk):
         ctk.CTkLabel(
             frame,
             text=(
-                "Guía rápida: 1) Conecta TikTok LIVE y Minecraft. 2) Pulsa Crear "
-                "y elige el modo por bloques o avanzado. 3) Para una regla de "
-                "likes, elige Invocar mobs e indica la cantidad cada X likes. "
-                "Deja el filtro vacío para "
-                "aceptar cualquier evento de ese tipo, o usa un campo como text "
-                "(comentario), gift_name (nombre del regalo) o shortname "
-                "(usuario). 4) Elige un mensaje de ejemplo o escribe un comando "
-                "Minecraft sin / y guarda. Usa {username} para TikTok, {player} "
-                "para el objetivo Minecraft, {gift_name} para identificar "
-                "regalos y {amount} para cuántos llegaron. Puedes escribir "
-                "varios comandos, uno por línea. 5) Pulsa Probar coincidencia para "
-                "revisar el filtro; esto no envía el comando. Finalmente, inicia "
-                "la automatización desde Inicio. Las variables se rellenan con "
-                "los datos recibidos de TikTok. La respuesta de API Bridge "
-                "confirma que se encoló, no que el comando terminó."
+                "Crea reglas según el tipo de evento. Los regalos requieren "
+                "nombre; likes usan un umbral. Ejecutar prueba envía la acción "
+                "con datos Free2Play; revisa antes el mundo seleccionado."
             ),
-            wraplength=820,
+            wraplength=760,
             justify="left",
-        ).grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+        ).grid(row=1, column=0, padx=16, pady=(0, 8), sticky="w")
         profile_bar = ctk.CTkFrame(frame, fg_color="transparent")
         profile_bar.grid(row=2, column=0, padx=14, pady=4, sticky="ew")
         profile_bar.grid_columnconfigure(1, weight=1)
@@ -1026,7 +1098,7 @@ class Free2PlayApp(ctk.CTk):
         )
         self.profile_menu = ctk.CTkOptionMenu(
             profile_bar,
-            values=["dani"],
+            values=["default"],
             command=self._switch_profile,
         )
         self.profile_menu.grid(row=0, column=1, padx=4, sticky="ew")
@@ -1038,7 +1110,7 @@ class Free2PlayApp(ctk.CTk):
         self.profile_status = ctk.CTkLabel(
             frame,
             text=(
-                "Los comandos del perfil Dani pueden modificar el mundo; "
+                "Los comandos del perfil default pueden modificar el mundo; "
                 "pruébalos en un mundo seguro."
             ),
             wraplength=820,
@@ -1230,12 +1302,35 @@ class Free2PlayApp(ctk.CTk):
         ctk.CTkLabel(
             announcements,
             text=(
-                "Plantilla. Variables: {usuario}, {gift_name}, {amount}, "
-                "{text}, {count}, {regla}, {interaccion}."
+                "Título (normalmente el nombre corto de TikTok). Variables: "
+                "{shortname}, {username}, {user}, {regla}."
             ),
             wraplength=760,
             justify="left",
         ).grid(row=3, column=0, padx=16, pady=(0, 4), sticky="w")
+        self.rule_announcement_title_template_entry = ctk.CTkEntry(
+            announcements,
+            placeholder_text=DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE,
+        )
+        self.rule_announcement_title_template_entry.insert(
+            0, DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE
+        )
+        self.rule_announcement_title_template_entry.grid(
+            row=4, column=0, padx=16, pady=(0, 8), sticky="ew"
+        )
+        self.rule_announcement_title_template_entry.bind(
+            "<FocusOut>", lambda _event: self._save_user_preferences()
+        )
+        ctk.CTkLabel(
+            announcements,
+            text=(
+                "Subtítulo. Para regalos puedes usar "
+                "{usuario} envió {gift_name} x{amount}; {interaccion} "
+                "se adapta también a comentarios, likes y follows."
+            ),
+            wraplength=760,
+            justify="left",
+        ).grid(row=5, column=0, padx=16, pady=(0, 4), sticky="w")
         self.rule_announcement_template_entry = ctk.CTkEntry(
             announcements,
             placeholder_text=DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE,
@@ -1244,15 +1339,15 @@ class Free2PlayApp(ctk.CTk):
             0, DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE
         )
         self.rule_announcement_template_entry.grid(
-            row=4, column=0, padx=16, pady=(0, 8), sticky="ew"
+            row=6, column=0, padx=16, pady=(0, 8), sticky="ew"
         )
         self.rule_announcement_template_entry.bind(
             "<FocusOut>", lambda _event: self._save_user_preferences()
         )
         ctk.CTkLabel(
             announcements,
-            text="Color del texto",
-        ).grid(row=5, column=0, padx=16, pady=(0, 4), sticky="w")
+            text="Color del título y subtítulo",
+        ).grid(row=7, column=0, padx=16, pady=(0, 4), sticky="w")
         self.rule_announcement_color_menu = ctk.CTkOptionMenu(
             announcements,
             values=["light_purple", "dark_purple"],
@@ -1260,7 +1355,7 @@ class Free2PlayApp(ctk.CTk):
         )
         self.rule_announcement_color_menu.set("light_purple")
         self.rule_announcement_color_menu.grid(
-            row=6, column=0, padx=16, pady=(0, 14), sticky="w"
+            row=8, column=0, padx=16, pady=(0, 14), sticky="w"
         )
         comment_chat = self._section(
             settings_content, "Comentarios de TikTok en Minecraft", 5
@@ -1409,6 +1504,20 @@ class Free2PlayApp(ctk.CTk):
                 DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE,
             )
         ).strip() or DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE
+        announcement_title_template = str(
+            self.preferences.get(
+                "rule_announcement_title_template",
+                DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE,
+            )
+        ).strip() or DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE
+        if (
+            announcement_title_template
+            != DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE
+        ):
+            self.rule_announcement_title_template_entry.delete(0, "end")
+            self.rule_announcement_title_template_entry.insert(
+                0, announcement_title_template
+            )
         if announcement_template != DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE:
             self.rule_announcement_template_entry.delete(0, "end")
             self.rule_announcement_template_entry.insert(
@@ -1463,6 +1572,10 @@ class Free2PlayApp(ctk.CTk):
                 "rule_announcement_template": (
                     self.rule_announcement_template_entry.get().strip()
                     or DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE
+                ),
+                "rule_announcement_title_template": (
+                    self.rule_announcement_title_template_entry.get().strip()
+                    or DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE
                 ),
                 "rule_announcement_color": (
                     self.rule_announcement_color_menu.get()
@@ -1872,14 +1985,15 @@ class Free2PlayApp(ctk.CTk):
         )
         self.events_processed += 1
         if event_type == "like":
-            try:
-                self.likes_received += max(0, int(event.get("count") or 0))
-            except (TypeError, ValueError):
-                self._log(
-                    "TikTok",
-                    "Evento de likes con count no válido",
-                    detail=str(event.get("count")),
-                )
+            like_increment = self.rule_engine.normalize_like_count(
+                event.get("count"),
+                event.get("total"),
+            )
+            event["count"] = like_increment
+            event["amount"] = like_increment
+            self.likes_received += like_increment
+        if event_type in {"comment", "gift", "follow", "share", "like", "join"}:
+            event.update(random_mob_variables())
         self.last_event_description = (
             f"{EVENT_LABELS.get(event_type, event_type)}"
             + (f" — {username}" if username else "")
@@ -1944,6 +2058,15 @@ class Free2PlayApp(ctk.CTk):
                 self._send_comment_to_minecraft(event)
 
         if not self.automation_running:
+            if event_type == "like":
+                self._log(
+                    event_type,
+                    "Likes recibidos; automatización pausada",
+                    detail=(
+                        f"Incremento: {event.get('count', 0)}. "
+                        "Inicia la automatización para evaluar la regla."
+                    ),
+                )
             return
         fallback_rule = None
         if (
@@ -1966,9 +2089,19 @@ class Free2PlayApp(ctk.CTk):
                     "Acción alternativa no válida",
                     detail=str(exc),
                 )
-        for rule in self.rule_engine.match_event(
+        matching_rules = self.rule_engine.match_event(
             event, fallback_rule=fallback_rule
-        ):
+        )
+        if event_type == "like" and not matching_rules:
+            self._log(
+                event_type,
+                "No se encontró una regla de likes activa",
+                detail=(
+                    f"Perfil: {self.active_profile_name}. Verifica que la regla "
+                    "de likes esté habilitada en el perfil seleccionado."
+                ),
+            )
+        for rule in matching_rules:
             self._log(event_type, "Regla activada", rule_name=rule.name)
             if self.minecraft_state != "connected" or not self.api_token:
                 self._log(
@@ -1993,8 +2126,10 @@ class Free2PlayApp(ctk.CTk):
                             "Esperando el siguiente umbral de likes",
                             rule_name=rule.name,
                             detail=(
-                                f"{like_increment} likes recibidos; "
-                                f"umbral {rule.like_threshold}"
+                                f"Progreso: "
+                                f"{self.rule_engine.like_progress(rule)}"
+                                f"/{rule.like_threshold} likes "
+                                f"(último incremento: {like_increment})"
                             ),
                         )
                         continue
@@ -2027,6 +2162,13 @@ class Free2PlayApp(ctk.CTk):
                 action_commands = render_action_commands(
                     rule.action, event_values
                 )
+                sender_name = str(
+                    event.get("user") or event.get("shortname") or ""
+                )
+                action_commands = [
+                    add_summon_custom_name(command, sender_name)
+                    for command in action_commands
+                ]
             except ValueError as exc:
                 self._log(
                     event_type,
@@ -2060,9 +2202,15 @@ class Free2PlayApp(ctk.CTk):
                     event
                 )
                 try:
-                    announcement_commands.append(
-                        render_tellraw_command(
+                    announcement_commands.extend(
+                        render_title_commands(
                             "@a",
+                            (
+                                self.rule_announcement_title_template_entry
+                                .get()
+                                .strip()
+                                or DEFAULT_RULE_ANNOUNCEMENT_TITLE_TEMPLATE
+                            ),
                             (
                                 self.rule_announcement_template_entry.get().strip()
                                 or DEFAULT_RULE_ANNOUNCEMENT_TEMPLATE
@@ -2074,7 +2222,7 @@ class Free2PlayApp(ctk.CTk):
                 except ValueError as exc:
                     self._log(
                         event_type,
-                        "No se pudo preparar el anuncio de chat",
+                        "No se pudo preparar el anuncio de título",
                         rule_name=rule.name,
                         detail=str(exc),
                     )
@@ -2195,6 +2343,24 @@ class Free2PlayApp(ctk.CTk):
         result: Any,
         error: str | None,
     ) -> None:
+        if action == "rule_test_command":
+            rule_id, rule_name, event_type, commands = metadata
+            button = self.rule_test_buttons.get(rule_id)
+            if button is not None:
+                button.configure(state="normal")
+            self._handle_task_result(
+                "minecraft_command",
+                (
+                    f"Prueba: {rule_name}",
+                    event_type,
+                    commands,
+                    True,
+                ),
+                result,
+                error,
+            )
+            return
+
         if action == "minecraft_install":
             self.install_button.configure(state="normal")
             if error:
@@ -2248,6 +2414,8 @@ class Free2PlayApp(ctk.CTk):
 
         if action == "minecraft_command":
             rule_name, event_type, commands, debug_enabled = metadata
+            if rule_name == "Prueba de API Bridge":
+                self.minecraft_test_command_button.configure(state="normal")
             if error:
                 self.current_activity = (
                     f"Falló la secuencia de «{rule_name}»: {error}"
@@ -2438,9 +2606,9 @@ class Free2PlayApp(ctk.CTk):
     def _toggle_automation(self) -> None:
         if (
             not self.automation_running
-            and self.active_profile_name.casefold() == "dani"
+            and self.active_profile_name.casefold() == "default"
             and not messagebox.askyesno(
-                "Activar el perfil Dani",
+                "Activar el perfil predeterminado",
                 "Este perfil puede invocar mobs hostiles, creepers, TNT, rayos, "
                 "wardens, withers y dragones, además de teletransportar jugadores. "
                 "Pruébalo primero en un mundo seguro. ¿Activar la automatización?",
@@ -2540,6 +2708,29 @@ class Free2PlayApp(ctk.CTk):
 
         self._submit("minecraft_test", work)
 
+    def _send_test_minecraft_command(self) -> None:
+        if self.minecraft_state != "connected" or not self.api_token:
+            self._log(
+                "Minecraft",
+                "Comando de prueba no enviado: API Bridge no conectado",
+                detail="Conecta Minecraft desde esta página y vuelve a probar.",
+            )
+            return
+        command = "say Free2Play: comando de prueba recibido"
+        self.minecraft_test_command_button.configure(state="disabled")
+        self._submit(
+            "minecraft_command",
+            lambda auth=self.api_token, url=self.api_url_entry.get().strip(): (
+                execute_command_sequence(auth, [command], url)
+            ),
+            metadata=(
+                "Prueba de API Bridge",
+                "Minecraft",
+                [command],
+                True,
+            ),
+        )
+
     def _install_mod(self) -> None:
         instance = self._selected_instance()
         version = self.minecraft_version_combo.get().strip()
@@ -2608,11 +2799,13 @@ class Free2PlayApp(ctk.CTk):
             legacy_rules = self.rule_store.load()
             self.profiles = self.profile_store.load(legacy_rules)
         except (OSError, ValueError) as exc:
-            self.profiles = [RuleProfile("dani", [])]
+            self.profiles = [RuleProfile("default", [])]
             self._log("Perfiles", "No se pudieron cargar", detail=str(exc))
         preferred_name = str(
-            self.preferences.get("active_profile", "dani")
+            self.preferences.get("active_profile", "default")
         ).casefold()
+        if preferred_name == "dani":
+            preferred_name = "default"
         selected_profile = next(
             (
                 profile
@@ -2626,7 +2819,7 @@ class Free2PlayApp(ctk.CTk):
                 (
                     profile
                     for profile in self.profiles
-                    if profile.name.casefold() == "dani"
+                    if profile.name.casefold() == "default"
                 ),
                 self.profiles[0],
             )
@@ -2755,26 +2948,79 @@ class Free2PlayApp(ctk.CTk):
             return
         for child in self.rules_list.winfo_children():
             child.destroy()
+        self.rule_test_buttons.clear()
         for row, rule in enumerate(self.rules):
-            description = (
-                f"{rule.name}  |  "
-                f"{EVENT_LABELS.get(rule.event_type, rule.event_type)}  |  "
-                f"{'Activa' if rule.enabled else 'Pausada'}  |  "
-                f"{rule.action}"
-            )
-            button = ctk.CTkButton(
+            card = ctk.CTkFrame(
                 self.rules_list,
-                text=description,
-                anchor="w",
-                fg_color=(
-                    ("#cfe8ff", "#1f538d")
-                    if rule.id == self.selected_rule_id
-                    else ("#e5e5e5", "#343638")
+                border_width=2 if rule.id == self.selected_rule_id else 0,
+                border_color=("#3b8ed0", "#1f6aa5"),
+            )
+            card.grid(
+                row=row,
+                column=0,
+                padx=6,
+                pady=(8, 6),
+                sticky="ew",
+            )
+            card.grid_columnconfigure(0, weight=1)
+            card.grid_columnconfigure(1, weight=0)
+            title = ctk.CTkButton(
+                card,
+                text=(
+                    f"{rule.name}  ·  "
+                    f"{EVENT_LABELS.get(rule.event_type, rule.event_type)}  ·  "
+                    f"{'Activa' if rule.enabled else 'Pausada'}"
                 ),
-                text_color=("black", "white"),
+                anchor="w",
+                fg_color="transparent",
+                hover=False,
+                text_color=("gray10", "gray90"),
+                font=ctk.CTkFont(size=15, weight="bold"),
                 command=lambda selected_id=rule.id: self._select_rule(selected_id),
             )
-            button.grid(row=row, column=0, padx=4, pady=4, sticky="ew")
+            title.grid(row=0, column=0, padx=(10, 4), pady=(8, 0), sticky="ew")
+            details = rule.action.replace("\n", "  •  ")
+            if rule.event_type == "gift":
+                details = (
+                    f"Regalo: {rule.conditions.get('gift_name') or 'sin especificar'}"
+                    f"  ·  {details}"
+                )
+            elif rule.event_type == "like":
+                details = (
+                    f"Cada {rule.like_threshold} likes"
+                    f"  ·  {details}"
+                )
+            ctk.CTkLabel(
+                card,
+                text=details,
+                anchor="w",
+                justify="left",
+                wraplength=760,
+                text_color=("gray35", "gray75"),
+            ).grid(
+                row=1,
+                column=0,
+                padx=(14, 8),
+                pady=(2, 9),
+                sticky="ew",
+            )
+            test_button = ctk.CTkButton(
+                card,
+                text="▶ Ejecutar",
+                width=112,
+                command=lambda selected_rule=rule: self._execute_rule_test(
+                    selected_rule
+                ),
+            )
+            test_button.grid(
+                row=0,
+                column=1,
+                rowspan=2,
+                padx=(4, 10),
+                pady=8,
+                sticky="e",
+            )
+            self.rule_test_buttons[rule.id] = test_button
         self.rules_list.grid_columnconfigure(0, weight=1)
 
     def _select_rule(self, rule_id: str) -> None:
@@ -2868,6 +3114,7 @@ class Free2PlayApp(ctk.CTk):
                 self.minecraft_target_entry.get().strip() or "@a"
             ),
         }
+        sample_event.update(random_mob_variables())
         sample_event.update(rule.conditions)
         matched = rule.matches(sample_event)
         preview = render_action_commands(rule.action, sample_event)
@@ -2886,6 +3133,76 @@ class Free2PlayApp(ctk.CTk):
             "Prueba correcta" if matched else "Prueba sin coincidencia",
             rule_name=rule.name,
             detail=f"Sin ejecución de comandos. Vista previa: {preview_text}",
+        )
+
+    def _execute_rule_test(self, rule: Rule) -> None:
+        if self.minecraft_state != "connected" or not self.api_token:
+            messagebox.showwarning(
+                "Minecraft desconectado",
+                "Conecta Minecraft antes de ejecutar una prueba de regla.",
+                parent=self,
+            )
+            return
+        try:
+            sample_event, commands = build_rule_test_commands(
+                rule,
+                player=self.minecraft_target_entry.get().strip() or "@a",
+                username="Free2Play",
+            )
+        except ValueError as exc:
+            messagebox.showerror(
+                "Comando de prueba no válido",
+                str(exc),
+                parent=self,
+            )
+            return
+
+        if not commands:
+            messagebox.showerror(
+                "Regla sin comandos",
+                "Esta regla no genera ningún comando para el evento de prueba.",
+                parent=self,
+            )
+            return
+        if len(commands) > 64:
+            messagebox.showerror(
+                "Demasiados comandos",
+                f"La prueba produciría {len(commands)} comandos; el límite seguro es 64.",
+                parent=self,
+            )
+            return
+
+        preview = "\n".join(commands[:6])
+        if len(commands) > 6:
+            preview += f"\n… y {len(commands) - 6} comando(s) más"
+        if not messagebox.askyesno(
+            "Ejecutar comando de prueba",
+            (
+                f"Se enviará a Minecraft una prueba de «{rule.name}» "
+                f"con el usuario {sample_event['user']}"
+                + (
+                    f" y el regalo «{sample_event['gift_name']}»."
+                    if rule.event_type == "gift"
+                    else "."
+                )
+                + f"\n\nComandos ({len(commands)}):\n{preview}"
+                + "\n\nLos comandos pueden modificar el mundo. ¿Continuar?"
+            ),
+            parent=self,
+        ):
+            return
+
+        button = self.rule_test_buttons.get(rule.id)
+        if button is not None:
+            button.configure(state="disabled")
+        token = self.api_token
+        base_url = self.api_url_entry.get().strip()
+        self._submit(
+            "rule_test_command",
+            lambda auth=token, url=base_url, sequence=commands: (
+                execute_command_sequence(auth, sequence, url)
+            ),
+            metadata=(rule.id, rule.name, rule.event_type, commands),
         )
 
     def _on_close(self) -> None:

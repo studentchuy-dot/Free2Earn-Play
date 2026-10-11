@@ -1,5 +1,5 @@
 #define AppName "Free2Play"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0-beta"
 #define SourceDir "dist\Free2Play"
 
 [Setup]

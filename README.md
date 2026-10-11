@@ -64,18 +64,24 @@ El token es una credencial: no lo compartas ni pegues en capturas, incidencias
 o mensajes. Free2Play limita estas solicitudes a direcciones locales y no
 envía el token a Internet.
 
-### 3. Comprueba un comando con cuidado
+### 3. Comprueba el envío de comandos
 
-1. En **Jugador/selector objetivo**, deja `@a` o indica un jugador Minecraft
-   conectado. Este campo se refiere a Minecraft, no al nombre de TikTok.
-2. Antes de activar reglas, crea o usa un perfil de prueba con una acción
-   sencilla y no destructiva, como enviar un mensaje al chat.
-3. Revisa **Registro** y activa **Depuración HTTP** solo si necesitas ver el
-   comando y la respuesta del API. La opción no debe mostrar el token.
+1. En **Minecraft**, con API Bridge conectado, pulsa **Enviar comando de
+   prueba**. Envía un mensaje `say` inocuo al chat del juego. Si el botón
+   indica que API Bridge encoló el comando, confirma que el mensaje aparece en
+   Minecraft.
+2. Si el comando de prueba aparece en el juego, pero una regla no funciona,
+   revisa que la automatización esté activa, que uses el perfil correcto y que
+   la regla esté habilitada. Para una regla de likes comprueba también el
+   progreso `X/200` en **Registro**.
+3. Activa **Depuración HTTP** si necesitas ver el comando de una regla y la
+   respuesta completa del API Bridge. La opción no debe mostrar el token.
 
 La respuesta del API puede indicar que el comando fue **encolado**. No es un
-acuse de que Minecraft terminó de ejecutarlo. Confirma el resultado en el chat
-del juego y en la salida del mod.
+acuse de que Minecraft terminó de ejecutarlo. Si API Bridge lo encoló, pero el
+mensaje de prueba no aparece, revisa el log de Minecraft y sus errores de
+comandos. Si la prueba aparece, pero una regla no, el problema está en sus
+condiciones/configuración y no en la conexión HTTP básica.
 
 ## Conectar TikTok LIVE
 
@@ -97,15 +103,16 @@ regalo manualmente.
 ## Crear reglas y activar la automatización
 
 1. Conecta Minecraft y TikTok LIVE siguiendo los pasos anteriores.
-2. Abre **Reglas** y selecciona un perfil. El perfil `dani` incluye ejemplos
+2. Abre **Reglas** y selecciona un perfil. El perfil `default` incluye ejemplos
    de acciones para follows, regalos y likes; puede modificar mucho el mundo.
 3. Pulsa **Crear**. Pon un nombre reconocible y selecciona qué evento de TikTok
    debe activar la regla.
-4. Opcionalmente añade un filtro:
-   - Para regalos, elige un nombre del catálogo o escríbelo. El campo típico es
-     `gift_name`.
-   - Para comentarios, el campo `text` filtra por texto.
-   - Deja filtro y valor vacíos para aceptar todos los eventos de ese tipo.
+4. Los controles se ajustan al evento:
+   - Para regalos, elige un nombre del catálogo o escríbelo; es obligatorio y
+     la regla solo se activa con ese regalo.
+   - Para comentarios puedes añadir un filtro opcional como `text`.
+   - Likes no requieren nombre de regalo ni campos de filtro; configuran el
+     umbral en **Invocar mobs**.
 5. Para comenzar, elige **Por bloques (sencillo)** y selecciona **Enviar
    mensaje al chat** o **Invocar mobs**. Para likes puedes fijar el umbral
    “cada X likes”.
@@ -119,11 +126,40 @@ regalo manualmente.
    - `{gift}` o `{gift_name}`: nombre del regalo.
    - `{amount}`: cantidad recibida.
    - `{player}`: objetivo Minecraft configurado en la página Minecraft.
-8. Guarda la regla. Selecciónala y usa **Probar coincidencia** para comprobar
-   el filtro con un evento de muestra; esta acción no ejecuta el comando.
+   - `{rmob}`: creeper, zombie, esqueleto, blaze o ghast al azar.
+   - `{rratio}`: elige entre esos hostiles dando menos probabilidad a blaze y
+     ghast.
+   - `{rpacific}`: elige un animal pacífico básico al azar.
+     Por ejemplo, en modo avanzado puedes poner `summon {rmob} ~ ~ ~`.
+8. Guarda la regla. **Probar coincidencia** comprueba el filtro con un evento
+   de muestra sin enviar comandos. Cada regla tiene además **Ejecutar** junto a
+   ella: prepara una prueba con el usuario `Free2Play` y, para regalos, el
+   nombre configurado en esa regla. Pide confirmación y envía la acción a
+   API Bridge; verifica luego el chat/log de Minecraft para confirmar que se
+   ejecutó. Úsalo solo en un mundo seguro.
 9. Activa solo las reglas que realmente quieras utilizar y, al final, vuelve a
    **Inicio** y pulsa **Iniciar automatización**. Acepta la confirmación del
-   perfil `dani` únicamente en un mundo preparado para ello.
+   perfil `default` únicamente en un mundo preparado para ello.
+
+Las reglas de invocación agregan el nombre visible del usuario de TikTok al
+mobs que generen y lo muestran sobre la entidad. En las reglas de likes, revisa
+el **Registro**: mientras no se alcance el umbral, indicará el progreso como
+`X/200`; al alcanzar el umbral enviará los comandos configurados. El contador
+acumula el incremento `count` de cada evento de TikTok; `total` se conserva
+como información del evento y no se resta entre usuarios.
+
+Cuando se activa una regla, el anuncio aparece en el centro de la pantalla de
+Minecraft: el título muestra `{shortname}` y el subtítulo describe el evento
+(por ejemplo, `envió Rose x2`). En **Ajustes** puedes editar ambas plantillas,
+usar `{gift_name}`, `{amount}`, `{text}`, `{count}`, `{regla}` o
+`{interaccion}`, elegir el morado claro/oscuro y apagar el anuncio. Este aviso
+se genera para cada regla coincidente, así que cada regalo conserva su nombre
+y cantidad reales.
+
+Las versiones anteriores llamaban `dani` al perfil inicial. Al cargarlo,
+Free2Play lo cambia automáticamente a `default`, conserva sus reglas y
+desactiva los creepers de las reglas predefinidas. Si ya tienes un perfil
+`default`, no combina ni sobrescribe perfiles existentes.
 
 La regla de respaldo para regalos sin coincidencia viene desactivada por
 defecto. Si la activas, comprueba primero el comando configurado. Los
